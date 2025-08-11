@@ -1,0 +1,28 @@
+# Unreal Engine Plugin temporary files
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Visual Studio files
+*.VC.db
+*.VC.opendb
+.vs/
+
+# Build files
+*.pdb
+*.lib
+*.exp
+*.dll
+*.exe
+*.patch_*
+
+# IDE specific files
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db

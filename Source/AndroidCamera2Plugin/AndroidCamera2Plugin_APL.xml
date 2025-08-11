@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- init section is always evaluated once per architecture -->
+    <init>
+        <log text="AndroidCamera2Plugin init"/>
+    </init>
+
+    <!-- optional updates applied to AndroidManifest.xml -->
+    <androidManifestUpdates>
+        <!-- Standard Android camera permissions -->
+        <addPermission android:name="android.permission.CAMERA"/>
+        
+        <!-- Meta Quest specific camera permissions -->
+        <addPermission android:name="horizonos.permission.HEADSET_CAMERA"/>
+        <addPermission android:name="horizonos.permission.AVATAR_CAMERA"/>
+        
+        <!-- Camera features -->
+        <addFeature android:name="android.hardware.camera2" android:required="false"/>
+        <addFeature android:name="android.hardware.camera" android:required="false"/>
+        <addFeature android:name="android.hardware.camera.autofocus" android:required="false"/>
+    </androidManifestUpdates>
+
+    <!-- Copy Java files to build directories -->
+    <prebuildCopies>
+        <log text="PluginDir: $S(PluginDir)"/>
+        <log text="BuildDir: $S(BuildDir)"/>
+        <copyFile src="$S(PluginDir)/Android/src/com/epicgames/ue4/Camera2Helper.java"
+                  dst="$S(BuildDir)/src/com/epicgames/ue4/Camera2Helper.java"/>
+        <log text="Camera2Helper.java copy attempted"/>
+    </prebuildCopies>
+    
+    <!-- Also try sourceCopies -->
+    <sourceCopies>
+        <copyFile src="$S(PluginDir)/Android/src/com/epicgames/ue4/Camera2Helper.java"
+                  dst="$S(BuildDir)/src/com/epicgames/ue4/Camera2Helper.java"/>
+    </sourceCopies>
+
+    <!-- ProGuard rules to keep our classes -->
+    <proguardAdditions>
+        <insert>
+# Keep Camera2 plugin classes
+-keep class com.epicgames.ue4.Camera2Helper { *; }
+-keep class com.epicgames.ue4.Camera2Helper$* { *; }
+-keepclassmembers class com.epicgames.ue4.Camera2Helper {
+    public *;
+    static *;
+    native *;
+}
+-dontwarn com.epicgames.ue4.Camera2Helper
+        </insert>
+    </proguardAdditions>
+
+    <!-- optional additions to GameActivity imports -->
+    <gameActivityImportAdditions>
+        <insert>
+import com.epicgames.ue4.Camera2Helper;
+        </insert>
+    </gameActivityImportAdditions>
+
+    <!-- optional additions to GameActivity onCreate -->
+    <gameActivityOnCreateAdditions>
+        <insert>
+// Initialize Camera helper with Activity context for permission handling
+Camera2Helper.getInstance(this);
+        </insert>
+    </gameActivityOnCreateAdditions>
+    
+    <!-- Handle permission result callback -->
+    <gameActivityOnRequestPermissionsResultAdditions>
+        <insert>
+// Handle camera permission result
+if (requestCode == 100) { // CAMERA_PERMISSION_REQUEST_CODE
+    boolean granted = false;
+    for (int i = 0; i &lt; grantResults.length; i++) {
+        if (permissions[i].equals(android.Manifest.permission.CAMERA)) {
+            if (grantResults[i] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                granted = true;
+                android.util.Log.d("Camera2Helper", "Camera permission granted by user");
+                // Permission granted, can retry camera start
+            } else {
+                android.util.Log.w("Camera2Helper", "Camera permission denied by user");
+            }
+            break;
+        }
+    }
+}
+        </insert>
+    </gameActivityOnRequestPermissionsResultAdditions>
+</root>

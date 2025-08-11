@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Android Camera2 Plugin",
+	"Description": "Android Camera2 API integration for Unreal Engine with Meta Quest support",
+	"Category": "Rendering",
+	"CreatedBy": "TARK (Olachat)",
+	"CreatedByURL": "https://github.com/olachat",
+	"DocsURL": "https://github.com/olachat/AndroidCamera2Plugin",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/olachat/AndroidCamera2Plugin/issues",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"EnabledByDefault": true,
+	"Modules": [
+		{
+			"Name": "AndroidCamera2Plugin",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"WhitelistPlatforms": [ "Win64", "Android" ]
+		}
+	]
+}
