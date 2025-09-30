@@ -13,6 +13,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Log;
+import android.util.SizeF;
 import android.view.Surface;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -33,12 +34,13 @@ public class Camera2Helper {
     
     // Frame data storage
     private byte[] latestFrameData;
-    private int frameWidth = 320;
-    private int frameHeight = 240;
+    private int frameWidth = 1280;
+    private int frameHeight = 720;
     private boolean isCapturing = false;
     
     // Native callback
     private static native void onFrameAvailable(byte[] data, int width, int height);
+    private static native void onIntrinsicsAvailable(float fx, float fy, float cx, float cy, float skew, int width, int height);
     
     private Camera2Helper(Context ctx) {
         this.context = ctx;
@@ -200,6 +202,41 @@ public class Camera2Helper {
                 Log.d(TAG, "Selected camera ID: " + cameraId);
             }
             
+            // Query intrinsics for selected camera (if available)
+            try {
+                CameraCharacteristics cc = cameraManager.getCameraCharacteristics(cameraId);
+                float[] intr = cc.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION);
+                float fx = 0, fy = 0, cx = 0, cy = 0, skew = 0;
+                if (intr != null && intr.length >= 4) {
+                    fx = intr[0]; fy = intr[1]; cx = intr[2]; cy = intr[3];
+                    if (intr.length >= 5) { skew = intr[4]; }
+                    Log.d(TAG, "Intrinsics found: fx="+fx+" fy="+fy+" cx="+cx+" cy="+cy+" skew="+skew);
+                } else {
+                    Log.w(TAG, "LENS_INTRINSIC_CALIBRATION not available or too short");
+                }
+
+                // Also try focal lengths in pixels if available
+                float[] focalLengthsMm = cc.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
+                SizeF sensorSizeMm = cc.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+                Integer pixelArrayW = cc.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) != null ?
+                        cc.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE).getWidth() : null;
+                Integer pixelArrayH = cc.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) != null ?
+                        cc.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE).getHeight() : null;
+                if ((fx == 0 || fy == 0) && focalLengthsMm != null && focalLengthsMm.length > 0 && sensorSizeMm != null && pixelArrayW != null && pixelArrayH != null) {
+                    float pixelsPerMmX = pixelArrayW / sensorSizeMm.getWidth();
+                    float pixelsPerMmY = pixelArrayH / sensorSizeMm.getHeight();
+                    fx = focalLengthsMm[0] * pixelsPerMmX;
+                    fy = focalLengthsMm[0] * pixelsPerMmY;
+                    cx = pixelArrayW * 0.5f;
+                    cy = pixelArrayH * 0.5f;
+                    Log.d(TAG, "Derived intrinsics from focal length: fx="+fx+" fy="+fy+" cx="+cx+" cy="+cy);
+                }
+
+                onIntrinsicsAvailable(fx, fy, cx, cy, skew, frameWidth, frameHeight);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to get intrinsics: "+e.getMessage());
+            }
+
             // Setup ImageReader for camera frames
             Log.d(TAG, "Creating ImageReader " + frameWidth + "x" + frameHeight);
             imageReader = ImageReader.newInstance(frameWidth, frameHeight, 

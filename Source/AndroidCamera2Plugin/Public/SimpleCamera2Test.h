@@ -34,4 +34,20 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "Camera2")
     static class UTexture2D* GetCameraTexture();
+
+    // Intrinsic calibration accessors (pixels)
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static float GetCameraFx();
+
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static float GetCameraFy();
+
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static FVector2D GetPrincipalPoint();
+
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static float GetCameraSkew();
+
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static FIntPoint GetCalibrationResolution();
 };

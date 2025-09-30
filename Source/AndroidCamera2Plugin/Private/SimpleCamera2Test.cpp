@@ -1,7 +1,12 @@
 #include "SimpleCamera2Test.h"
 #include "Engine/Engine.h"
 #include "Async/AsyncWork.h"
+#include "Async/Async.h"
 #include "Engine/Texture2D.h"
+#include "Engine/Texture.h"
+#include "RHI.h"
+#include "RHICommandList.h"
+#include "Rendering/Texture2DResource.h"
 
 DEFINE_LOG_CATEGORY(LogSimpleCamera2);
 
@@ -17,6 +22,15 @@ DEFINE_LOG_CATEGORY(LogSimpleCamera2);
 // Static variables for camera preview
 static UTexture2D* CameraTexture = nullptr;
 static bool bCameraPreviewActive = false;
+
+// Intrinsics storage (pixels)
+static float GCameraFx = 0.0f;
+static float GCameraFy = 0.0f;
+static float GCameraCx = 0.0f;
+static float GCameraCy = 0.0f;
+static float GCameraSkew = 0.0f;
+static int32 GCameraCalibWidth = 0;
+static int32 GCameraCalibHeight = 0;
 
 #if PLATFORM_ANDROID
 static jobject Camera2HelperInstance = nullptr;
@@ -59,24 +73,63 @@ Java_com_epicgames_ue4_Camera2Helper_onFrameAvailable(JNIEnv* env, jclass clazz,
     // Release Java array immediately
     env->ReleaseByteArrayElements(data, frameData, JNI_ABORT);
         
-    // Update texture on game thread
-    AsyncTask(ENamedThreads::GameThread, [FrameDataCopy, width, height, DataSize]()
+    // Helper: enqueue render-thread texture update taking ownership of buffer
+    auto EnqueueTextureUpdateOwned = [](UTexture2D* Texture, uint8* OwnedBuffer, int32 W, int32 H)
+    {
+        if (!Texture || !Texture->GetResource())
+        {
+            if (OwnedBuffer) { delete[] OwnedBuffer; }
+            return;
+        }
+        FTexture2DResource* TextureResource = static_cast<FTexture2DResource*>(Texture->GetResource());
+        const uint32 SrcPitch = static_cast<uint32>(W) * 4u;
+        FUpdateTextureRegion2D Region(0, 0, 0, 0, static_cast<uint32>(W), static_cast<uint32>(H));
+        ENQUEUE_RENDER_COMMAND(UpdateCameraTexture2D)(
+            [TextureResource, Region, OwnedBuffer, SrcPitch](FRHICommandListImmediate& RHICmdList)
+            {
+                RHICmdList.UpdateTexture2D(TextureResource->GetTexture2DRHI(), 0, Region, SrcPitch, OwnedBuffer);
+                delete[] OwnedBuffer;
+            });
+    };
+
+    // Update texture on game thread, then enqueue render update
+    AsyncTask(ENamedThreads::Type::GameThread, [FrameDataCopy, width, height, DataSize, EnqueueTextureUpdateOwned]()
     {
         if (CameraTexture)
         {
-            // Update texture data
-            FTexture2DMipMap& Mip = CameraTexture->GetPlatformData()->Mips[0];
-            void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-            FMemory::Memcpy(TextureData, FrameDataCopy, DataSize);
-            Mip.BulkData.Unlock();
-            CameraTexture->UpdateResource();
-            
-            UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 frame applied on game thread: %dx%d, DataSize: %d"), width, height, DataSize);
+            EnqueueTextureUpdateOwned(CameraTexture, FrameDataCopy, width, height);
+            UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 frame enqueued to render thread: %dx%d, DataSize: %d"), width, height, DataSize);
         }
-        
-        // Clean up the copied data
-        delete[] FrameDataCopy;
+        else
+        {
+            delete[] FrameDataCopy;
+        }
     });
+}
+#endif
+
+#if PLATFORM_ANDROID
+// JNI callback for intrinsics
+extern "C" JNIEXPORT void JNICALL
+Java_com_epicgames_ue4_Camera2Helper_onIntrinsicsAvailable(JNIEnv* env, jclass clazz,
+    jfloat fx, jfloat fy, jfloat cx, jfloat cy, jfloat skew, jint width, jint height)
+{
+    UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 intrinsics received: fx=%.2f fy=%.2f cx=%.2f cy=%.2f skew=%.3f %dx%d"),
+        fx, fy, cx, cy, skew, width, height);
+
+    GCameraFx = fx;
+    GCameraFy = fy;
+    GCameraCx = cx;
+    GCameraCy = cy;
+    GCameraSkew = skew;
+    GCameraCalibWidth = width;
+    GCameraCalibHeight = height;
+
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Cyan,
+            FString::Printf(TEXT("Intrinsics fx=%.0f fy=%.0f cx=%.0f cy=%.0f"), fx, fy, cx, cy));
+    }
 }
 #endif
 
@@ -171,19 +224,48 @@ bool USimpleCamera2Test::StartCameraPreview()
     UE_LOG(LogSimpleCamera2, Warning, TEXT("=== CHECKING CAMERA TEXTURE ==="));
     if (!CameraTexture)
     {
-        UE_LOG(LogSimpleCamera2, Warning, TEXT("Creating new camera texture 320x240"));
-        CameraTexture = UTexture2D::CreateTransient(320, 240, PF_B8G8R8A8);
+        UE_LOG(LogSimpleCamera2, Warning, TEXT("Creating new camera texture 1280x720"));
+        CameraTexture = UTexture2D::CreateTransient(1280, 720, PF_B8G8R8A8);
         if (CameraTexture)
         {
             UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera texture created successfully"));
             CameraTexture->AddToRoot(); // Prevent garbage collection
-            
-            // Initialize with dark pattern to show it's waiting for camera
-            FTexture2DMipMap& Mip = CameraTexture->GetPlatformData()->Mips[0];
-            void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-            FMemory::Memset(TextureData, 64, 320 * 240 * 4); // Dark gray
-            Mip.BulkData.Unlock();
+
+            // Initialize with dark pattern asynchronously
+            const int32 InitW = 1280;
+            const int32 InitH = 720;
+            const int32 InitSize = InitW * InitH * 4;
+            uint8* InitData = new uint8[InitSize];
+            FMemory::Memset(InitData, 64, InitSize); // Dark gray
+
+            // Ensure resource is created before update
             CameraTexture->UpdateResource();
+            AsyncTask(ENamedThreads::Type::GameThread, [InitData, InitW, InitH]()
+            {
+                if (CameraTexture)
+                {
+                    FTexture2DResource* TextureResource = static_cast<FTexture2DResource*>(CameraTexture->GetResource());
+                    if (TextureResource)
+                    {
+                        const uint32 Pitch = static_cast<uint32>(InitW) * 4u;
+                        FUpdateTextureRegion2D Region(0, 0, 0, 0, static_cast<uint32>(InitW), static_cast<uint32>(InitH));
+                        ENQUEUE_RENDER_COMMAND(InitCameraTexture2D)(
+                            [TextureResource, Region, InitData, Pitch](FRHICommandListImmediate& RHICmdList)
+                            {
+                                RHICmdList.UpdateTexture2D(TextureResource->GetTexture2DRHI(), 0, Region, Pitch, InitData);
+                                delete[] InitData;
+                            });
+                    }
+                    else
+                    {
+                        delete[] InitData;
+                    }
+                }
+                else
+                {
+                    delete[] InitData;
+                }
+            });
         }
     }
     
@@ -375,4 +457,30 @@ void USimpleCamera2Test::StopCameraPreview()
 UTexture2D* USimpleCamera2Test::GetCameraTexture()
 {
     return CameraTexture;
+}
+
+// Blueprint accessors for intrinsics
+float USimpleCamera2Test::GetCameraFx()
+{
+    return GCameraFx;
+}
+
+float USimpleCamera2Test::GetCameraFy()
+{
+    return GCameraFy;
+}
+
+FVector2D USimpleCamera2Test::GetPrincipalPoint()
+{
+    return FVector2D(GCameraCx, GCameraCy);
+}
+
+float USimpleCamera2Test::GetCameraSkew()
+{
+    return GCameraSkew;
+}
+
+FIntPoint USimpleCamera2Test::GetCalibrationResolution()
+{
+    return FIntPoint(GCameraCalibWidth, GCameraCalibHeight);
 }
