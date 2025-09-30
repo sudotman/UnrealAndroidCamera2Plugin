@@ -41,6 +41,8 @@ public class Camera2Helper {
     // Native callback
     private static native void onFrameAvailable(byte[] data, int width, int height);
     private static native void onIntrinsicsAvailable(float fx, float fy, float cx, float cy, float skew, int width, int height);
+    private static native void onDistortionAvailable(float[] coeffs, int length);
+    private static native void onOriginalResolutionAvailable(int width, int height);
     
     private Camera2Helper(Context ctx) {
         this.context = ctx;
@@ -233,6 +235,62 @@ public class Camera2Helper {
                 }
 
                 onIntrinsicsAvailable(fx, fy, cx, cy, skew, frameWidth, frameHeight);
+
+                // Send original sensor/active-array resolution so UE can scale intrinsics
+                int srcW = 0, srcH = 0;
+                try {
+                    android.util.Size pixelArray = cc.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE);
+                    if (pixelArray != null) {
+                        srcW = pixelArray.getWidth();
+                        srcH = pixelArray.getHeight();
+                        Log.d(TAG, "Pixel array size: " + srcW + "x" + srcH);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "SENSOR_INFO_PIXEL_ARRAY_SIZE unavailable: " + e.getMessage());
+                }
+
+                if (srcW == 0 || srcH == 0) {
+                    try {
+                        android.graphics.Rect active = cc.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+                        if (active != null) {
+                            srcW = active.width();
+                            srcH = active.height();
+                            Log.d(TAG, "Active array size: " + srcW + "x" + srcH);
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "ACTIVE_ARRAY_SIZE unavailable: " + e.getMessage());
+                    }
+                }
+
+                if (srcW > 0 && srcH > 0) {
+                    onOriginalResolutionAvailable(srcW, srcH);
+                }
+
+                // Try to fetch distortion coefficients (varies by device)
+                float[] lensDist = null;
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        // Brown model: k1, k2, p1, p2, k3 (and optionally higher order)
+                        lensDist = cc.get(CameraCharacteristics.LENS_DISTORTION);
+                    }
+                } catch (Exception e) {
+                    Log.w(TAG, "LENS_DISTORTION unavailable: " + e.getMessage());
+                }
+
+                if (lensDist == null) {
+                    try {
+                        lensDist = cc.get(CameraCharacteristics.LENS_RADIAL_DISTORTION);
+                    } catch (Exception e) {
+                        Log.w(TAG, "LENS_RADIAL_DISTORTION unavailable: " + e.getMessage());
+                    }
+                }
+
+                if (lensDist != null && lensDist.length > 0) {
+                    Log.d(TAG, "Distortion length=" + lensDist.length);
+                    onDistortionAvailable(lensDist, lensDist.length);
+                } else {
+                    Log.d(TAG, "No distortion array available on this device");
+                }
             } catch (Exception e) {
                 Log.w(TAG, "Failed to get intrinsics: "+e.getMessage());
             }

@@ -32,6 +32,14 @@ static float GCameraSkew = 0.0f;
 static int32 GCameraCalibWidth = 0;
 static int32 GCameraCalibHeight = 0;
 
+// Lens distortion storage
+static TArray<float> GLensDistortionCoeffs;
+static int32 GLensDistortionLength = 0;
+
+// Original resolution storage
+static int32 GOriginalResolutionWidth = 0;
+static int32 GOriginalResolutionHeight = 0;
+
 #if PLATFORM_ANDROID
 static jobject Camera2HelperInstance = nullptr;
 #endif
@@ -129,6 +137,75 @@ Java_com_epicgames_ue4_Camera2Helper_onIntrinsicsAvailable(JNIEnv* env, jclass c
     {
         GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Cyan,
             FString::Printf(TEXT("Intrinsics fx=%.0f fy=%.0f cx=%.0f cy=%.0f"), fx, fy, cx, cy));
+    }
+}
+
+// JNI callback for lens distortion coefficients
+extern "C" JNIEXPORT void JNICALL
+Java_com_epicgames_ue4_Camera2Helper_onDistortionAvailable(JNIEnv* env, jclass clazz,
+    jfloatArray coeffs, jint length)
+{
+    UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 lens distortion received: length=%d"), length);
+
+    if (coeffs && length > 0)
+    {
+        // Get distortion coefficients from Java
+        jfloat* distortionData = env->GetFloatArrayElements(coeffs, nullptr);
+        if (distortionData)
+        {
+            // Store distortion coefficients
+            GLensDistortionCoeffs.SetNum(length);
+            GLensDistortionLength = length;
+            
+            for (int32 i = 0; i < length; i++)
+            {
+                GLensDistortionCoeffs[i] = distortionData[i];
+            }
+            
+            // Log first few coefficients for debugging
+            FString CoeffStr = TEXT("Distortion coeffs: ");
+            for (int32 i = 0; i < FMath::Min(length, 5); i++)
+            {
+                CoeffStr += FString::Printf(TEXT("%.4f "), GLensDistortionCoeffs[i]);
+            }
+            UE_LOG(LogSimpleCamera2, Warning, TEXT("%s"), *CoeffStr);
+            
+            if (GEngine)
+            {
+                GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Magenta,
+                    FString::Printf(TEXT("Lens Distortion: %d coeffs"), length));
+            }
+            
+            // Release Java array
+            env->ReleaseFloatArrayElements(coeffs, distortionData, JNI_ABORT);
+        }
+        else
+        {
+            UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get distortion data from Java"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogSimpleCamera2, Warning, TEXT("No lens distortion data available"));
+        GLensDistortionCoeffs.Empty();
+        GLensDistortionLength = 0;
+    }
+}
+
+// JNI callback for original resolution
+extern "C" JNIEXPORT void JNICALL
+Java_com_epicgames_ue4_Camera2Helper_onOriginalResolutionAvailable(JNIEnv* env, jclass clazz,
+    jint width, jint height)
+{
+    UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 original resolution received: %dx%d"), width, height);
+
+    GOriginalResolutionWidth = width;
+    GOriginalResolutionHeight = height;
+
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Orange,
+            FString::Printf(TEXT("Original Resolution: %dx%d"), width, height));
     }
 }
 #endif
@@ -483,4 +560,14 @@ float USimpleCamera2Test::GetCameraSkew()
 FIntPoint USimpleCamera2Test::GetCalibrationResolution()
 {
     return FIntPoint(GCameraCalibWidth, GCameraCalibHeight);
+}
+
+TArray<float> USimpleCamera2Test::GetLensDistortion()
+{
+    return GLensDistortionCoeffs;
+}
+
+FIntPoint USimpleCamera2Test::GetOriginalResolution()
+{
+    return FIntPoint(GOriginalResolutionWidth, GOriginalResolutionHeight);
 }

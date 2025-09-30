@@ -50,4 +50,10 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
     static FIntPoint GetCalibrationResolution();
+
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static TArray<float> GetLensDistortion();
+
+    UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
+    static FIntPoint GetOriginalResolution();
 };
