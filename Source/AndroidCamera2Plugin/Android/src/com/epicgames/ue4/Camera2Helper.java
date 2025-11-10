@@ -18,6 +18,11 @@ import android.view.Surface;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import android.Manifest;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.List;
 
 public class Camera2Helper {
     private static final String TAG = "Camera2Helper";
@@ -35,7 +40,7 @@ public class Camera2Helper {
     // Frame data storage
     private byte[] latestFrameData;
     private int frameWidth = 1280;
-    private int frameHeight = 720;
+    private int frameHeight = 960;
     private boolean isCapturing = false;
     
     // Native callback
@@ -43,6 +48,9 @@ public class Camera2Helper {
     private static native void onIntrinsicsAvailable(float fx, float fy, float cx, float cy, float skew, int width, int height);
     private static native void onDistortionAvailable(float[] coeffs, int length);
     private static native void onOriginalResolutionAvailable(int width, int height);
+    private static native void onPixelArraySizeAvailable(int width, int height);
+    private static native void onActiveArraySizeAvailable(int width, int height);
+    private static native void onCharacteristicsDumpAvailable(String json);
     
     private Camera2Helper(Context ctx) {
         this.context = ctx;
@@ -203,6 +211,10 @@ public class Camera2Helper {
             } else {
                 Log.d(TAG, "Selected camera ID: " + cameraId);
             }
+            // Remember selection for dumps
+            this.currentCameraId = cameraId;
+            // Trigger an immediate dump of characteristics for this camera
+            try { dumpCameraCharacteristics(); } catch (Exception e) { Log.w(TAG, "Auto dump failed: " + e.getMessage()); }
             
             // Query intrinsics for selected camera (if available)
             try {
@@ -234,8 +246,6 @@ public class Camera2Helper {
                     Log.d(TAG, "Derived intrinsics from focal length: fx="+fx+" fy="+fy+" cx="+cx+" cy="+cy);
                 }
 
-                onIntrinsicsAvailable(fx, fy, cx, cy, skew, frameWidth, frameHeight);
-
                 // Send original sensor/active-array resolution so UE can scale intrinsics
                 int srcW = 0, srcH = 0;
                 try {
@@ -244,6 +254,7 @@ public class Camera2Helper {
                         srcW = pixelArray.getWidth();
                         srcH = pixelArray.getHeight();
                         Log.d(TAG, "Pixel array size: " + srcW + "x" + srcH);
+                        onPixelArraySizeAvailable(srcW, srcH);
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "SENSOR_INFO_PIXEL_ARRAY_SIZE unavailable: " + e.getMessage());
@@ -256,6 +267,7 @@ public class Camera2Helper {
                             srcW = active.width();
                             srcH = active.height();
                             Log.d(TAG, "Active array size: " + srcW + "x" + srcH);
+                            onActiveArraySizeAvailable(srcW, srcH);
                         }
                     } catch (Exception e) {
                         Log.w(TAG, "ACTIVE_ARRAY_SIZE unavailable: " + e.getMessage());
@@ -291,9 +303,17 @@ public class Camera2Helper {
                 } else {
                     Log.d(TAG, "No distortion array available on this device");
                 }
+
+                Intr kStream = intrinsicsForStream(fx, fy, cx, cy, srcW, srcH, frameWidth, frameHeight);
+                onIntrinsicsAvailable(fx, fy, cx, cy, skew, frameWidth, frameHeight);
+
+                onOriginalResolutionAvailable(srcW, srcH); // keep sending this if your native side logs it
+
             } catch (Exception e) {
                 Log.w(TAG, "Failed to get intrinsics: "+e.getMessage());
             }
+
+            
 
             // Setup ImageReader for camera frames
             Log.d(TAG, "Creating ImageReader " + frameWidth + "x" + frameHeight);
@@ -357,6 +377,183 @@ public class Camera2Helper {
             e.printStackTrace();
             return false;
         }
+    }
+
+    private static class Intr {
+        float fx, fy, cx, cy;
+    }
+
+    private static android.graphics.Rect centerCrop(int srcW, int srcH, int dstW, int dstH) {
+        float srcAspect = (float) srcW / (float) srcH;
+        float dstAspect = (float) dstW / (float) dstH;
+        if (dstAspect > srcAspect) {
+            // Wider output: crop height
+            int cropH = Math.round(srcW / dstAspect);
+            int top = (srcH - cropH) / 2;
+            return new android.graphics.Rect(0, top, srcW, top + cropH);
+        } else {
+            // Taller output: crop width
+            int cropW = Math.round(srcH * dstAspect);
+            int left = (srcW - cropW) / 2;
+            return new android.graphics.Rect(left, 0, left + cropW, srcH);
+        }
+    }
+
+    // Remember currently selected camera for dumps
+    private String currentCameraId;
+
+    // Public method to dump all CameraCharacteristics to JSON and send to native
+    public void dumpCameraCharacteristics() {
+        try {
+            if (cameraManager == null) {
+                Log.e(TAG, "cameraManager is null; cannot dump characteristics");
+                return;
+            }
+            String id = currentCameraId;
+            if (id == null) {
+                // Try a best-effort default
+                String[] ids = cameraManager.getCameraIdList();
+                if (ids != null && ids.length > 0) {
+                    id = ids[0];
+                }
+            }
+            if (id == null) {
+                Log.e(TAG, "No cameraId available for dump");
+                return;
+            }
+
+            CameraCharacteristics cc = cameraManager.getCameraCharacteristics(id);
+            JSONObject root = new JSONObject();
+            root.put("cameraId", id);
+            root.put("sdk", Build.VERSION.SDK_INT);
+
+            JSONObject values = new JSONObject();
+            // Prefer official getKeys() when available
+            boolean dumpedAny = false;
+            try {
+                Method getKeysMethod = CameraCharacteristics.class.getMethod("getKeys");
+                @SuppressWarnings("unchecked")
+                List<CameraCharacteristics.Key<?>> keys = (List<CameraCharacteristics.Key<?>>) getKeysMethod.invoke(cc);
+                if (keys != null) {
+                    for (CameraCharacteristics.Key<?> key : keys) {
+                        String keyName = getKeyName(key);
+                        Object val = safeGet(cc, key);
+                        values.put(keyName, toJsonValue(val));
+                        dumpedAny = true;
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "getKeys() unavailable; will use reflection fallback: " + t.getMessage());
+            }
+
+            if (!dumpedAny) {
+                // Reflection fallback: static fields of type CameraCharacteristics.Key
+                for (Field f : CameraCharacteristics.class.getFields()) {
+                    try {
+                        if (CameraCharacteristics.Key.class.isAssignableFrom(f.getType())) {
+                            @SuppressWarnings("unchecked")
+                            CameraCharacteristics.Key<?> key = (CameraCharacteristics.Key<?>) f.get(null);
+                            if (key != null) {
+                                // Prefer the public constant field name for readability
+                                String keyName = f.getName();
+                                Object val = safeGet(cc, key);
+                                values.put(keyName, toJsonValue(val));
+                            }
+                        }
+                    } catch (Throwable ignored) { }
+                }
+            }
+
+            root.put("values", values);
+            String json = root.toString();
+            Log.d(TAG, "Dumped CameraCharacteristics JSON length=" + json.length());
+            onCharacteristicsDumpAvailable(json);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to dump CameraCharacteristics: " + e.getMessage());
+        }
+    }
+
+    private static Object safeGet(CameraCharacteristics cc, CameraCharacteristics.Key<?> key) {
+        try {
+            @SuppressWarnings("unchecked")
+            Object val = cc.get((CameraCharacteristics.Key<Object>) key);
+            return val;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static String getKeyName(CameraCharacteristics.Key<?> key) {
+        try {
+            Method m = key.getClass().getMethod("getName");
+            m.setAccessible(true);
+            Object name = m.invoke(key);
+            if (name != null) return name.toString();
+        } catch (Throwable ignored) { }
+        // Fallback to toString()
+        try {
+            String s = key.toString();
+            return s != null ? s : "<unknown>";
+        } catch (Throwable t) {
+            return "<unknown>";
+        }
+    }
+
+    private static Object toJsonValue(Object val) {
+        if (val == null) return JSONObject.NULL;
+        if (val instanceof Number || val instanceof Boolean || val instanceof String) return val;
+        if (val instanceof android.util.Size) {
+            android.util.Size s = (android.util.Size) val;
+            JSONObject o = new JSONObject();
+            try { o.put("width", s.getWidth()); o.put("height", s.getHeight()); } catch (Exception ignored) {}
+            return o;
+        }
+        if (val instanceof android.graphics.Rect) {
+            android.graphics.Rect r = (android.graphics.Rect) val;
+            JSONObject o = new JSONObject();
+            try { o.put("left", r.left); o.put("top", r.top); o.put("right", r.right); o.put("bottom", r.bottom); } catch (Exception ignored) {}
+            return o;
+        }
+        if (val instanceof android.util.Range) {
+            android.util.Range<?> r = (android.util.Range<?>) val;
+            JSONObject o = new JSONObject();
+            try { o.put("lower", String.valueOf(r.getLower())); o.put("upper", String.valueOf(r.getUpper())); } catch (Exception ignored) {}
+            return o;
+        }
+        if (val instanceof SizeF) {
+            SizeF s = (SizeF) val;
+            JSONObject o = new JSONObject();
+            try { o.put("width", s.getWidth()); o.put("height", s.getHeight()); } catch (Exception ignored) {}
+            return o;
+        }
+        if (val.getClass().isArray()) {
+            JSONArray arr = new JSONArray();
+            int len = java.lang.reflect.Array.getLength(val);
+            for (int i = 0; i < len; i++) {
+                Object e = java.lang.reflect.Array.get(val, i);
+                arr.put(toJsonValue(e));
+            }
+            return arr;
+        }
+        if (val instanceof java.util.Collection) {
+            JSONArray arr = new JSONArray();
+            for (Object e : (java.util.Collection<?>) val) arr.put(toJsonValue(e));
+            return arr;
+        }
+        // Fallback
+        return String.valueOf(val);
+    }
+
+    private static Intr intrinsicsForStream(float fx, float fy, float cx, float cy,  int sensorW, int sensorH, int outW, int outH) {
+        android.graphics.Rect crop = centerCrop(sensorW, sensorH, outW, outH);
+        float sx = (float) outW / (float) crop.width();
+        float sy = (float) outH / (float) crop.height();
+        Intr k = new Intr();
+        k.fx = fx * sx;
+        k.fy = fy * sy;
+        k.cx = (cx - crop.left) * sx;
+        k.cy = (cy - crop.top) * sy;
+        return k;
     }
     
     private void createCaptureSession() {

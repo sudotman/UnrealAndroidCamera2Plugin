@@ -40,6 +40,9 @@ static int32 GLensDistortionLength = 0;
 static int32 GOriginalResolutionWidth = 0;
 static int32 GOriginalResolutionHeight = 0;
 
+// JSON dump of full CameraCharacteristics
+static FString GCameraCharacteristicsJson;
+
 #if PLATFORM_ANDROID
 static jobject Camera2HelperInstance = nullptr;
 #endif
@@ -52,11 +55,19 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_epicgames_ue4_Camera2Helper_onFrameAvailable(JNIEnv* env, jclass clazz, 
     jbyteArray data, jint width, jint height)
 {
-    UE_LOG(LogSimpleCamera2, Log, TEXT("Camera2 frame received: %dx%d"), width, height);
+    static bool bCamera2LogsOnce = false;
+    if (!bCamera2LogsOnce)
+    {
+        UE_LOG(LogSimpleCamera2, Log, TEXT("Camera2 frame received: %dx%d"), width, height);
+    }
     
     if (!CameraTexture || !data)
     {
-        UE_LOG(LogSimpleCamera2, Warning, TEXT("CameraTexture or data is null"));
+        if (!bCamera2LogsOnce)
+        {
+            UE_LOG(LogSimpleCamera2, Warning, TEXT("CameraTexture or data is null"));
+        }
+        bCamera2LogsOnce = true;
         return;
     }
         
@@ -64,7 +75,11 @@ Java_com_epicgames_ue4_Camera2Helper_onFrameAvailable(JNIEnv* env, jclass clazz,
     jbyte* frameData = env->GetByteArrayElements(data, nullptr);
     if (!frameData)
     {
-        UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get frame data from Java"));
+        if (!bCamera2LogsOnce)
+        {
+            UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get frame data from Java"));
+        }
+        bCamera2LogsOnce = true;
         return;
     }
     
@@ -74,9 +89,12 @@ Java_com_epicgames_ue4_Camera2Helper_onFrameAvailable(JNIEnv* env, jclass clazz,
     FMemory::Memcpy(FrameDataCopy, frameData, DataSize);
     
     // Check first few bytes of frame data
-    UE_LOG(LogSimpleCamera2, Warning, TEXT("Frame data sample: [%d, %d, %d, %d, %d, %d, %d, %d]"), 
-        FrameDataCopy[0], FrameDataCopy[1], FrameDataCopy[2], FrameDataCopy[3],
-        FrameDataCopy[4], FrameDataCopy[5], FrameDataCopy[6], FrameDataCopy[7]);
+    if (!bCamera2LogsOnce)
+    {
+        UE_LOG(LogSimpleCamera2, Warning, TEXT("Frame data sample: [%d, %d, %d, %d, %d, %d, %d, %d]"), 
+            FrameDataCopy[0], FrameDataCopy[1], FrameDataCopy[2], FrameDataCopy[3],
+            FrameDataCopy[4], FrameDataCopy[5], FrameDataCopy[6], FrameDataCopy[7]);
+    }
     
     // Release Java array immediately
     env->ReleaseByteArrayElements(data, frameData, JNI_ABORT);
@@ -106,17 +124,43 @@ Java_com_epicgames_ue4_Camera2Helper_onFrameAvailable(JNIEnv* env, jclass clazz,
         if (CameraTexture)
         {
             EnqueueTextureUpdateOwned(CameraTexture, FrameDataCopy, width, height);
-            UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 frame enqueued to render thread: %dx%d, DataSize: %d"), width, height, DataSize);
+            if (!bCamera2LogsOnce)
+            {
+                UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 frame enqueued to render thread: %dx%d, DataSize: %d"), width, height, DataSize);
+            }
         }
         else
         {
             delete[] FrameDataCopy;
         }
+        bCamera2LogsOnce = true;
     });
 }
 #endif
 
 #if PLATFORM_ANDROID
+// JNI callback for full CameraCharacteristics JSON dump
+extern "C" JNIEXPORT void JNICALL
+Java_com_epicgames_ue4_Camera2Helper_onCharacteristicsDumpAvailable(JNIEnv* env, jclass clazz,
+    jstring jsonStr)
+{
+    const char* UTFChars = (jsonStr != nullptr) ? env->GetStringUTFChars(jsonStr, nullptr) : nullptr;
+    if (UTFChars)
+    {
+        GCameraCharacteristicsJson = UTF8_TO_TCHAR(UTFChars);
+        env->ReleaseStringUTFChars(jsonStr, UTFChars);
+        UE_LOG(LogSimpleCamera2, Warning, TEXT("Received CameraCharacteristics JSON dump (%d chars)"), GCameraCharacteristicsJson.Len());
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Silver, TEXT("CameraCharacteristics dump received"));
+        }
+    }
+    else
+    {
+        UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to receive CameraCharacteristics JSON dump"));
+    }
+}
+
 // JNI callback for intrinsics
 extern "C" JNIEXPORT void JNICALL
 Java_com_epicgames_ue4_Camera2Helper_onIntrinsicsAvailable(JNIEnv* env, jclass clazz,
@@ -137,6 +181,32 @@ Java_com_epicgames_ue4_Camera2Helper_onIntrinsicsAvailable(JNIEnv* env, jclass c
     {
         GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Cyan,
             FString::Printf(TEXT("Intrinsics fx=%.0f fy=%.0f cx=%.0f cy=%.0f"), fx, fy, cx, cy));
+    }
+}
+
+// JNI callback for SENSOR_INFO_PIXEL_ARRAY_SIZE
+extern "C" JNIEXPORT void JNICALL
+Java_com_epicgames_ue4_Camera2Helper_onPixelArraySizeAvailable(JNIEnv* env, jclass clazz,
+    jint width, jint height)
+{
+    UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 pixel array size: %dx%d"), width, height);
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Silver,
+            FString::Printf(TEXT("Pixel Array: %dx%d"), width, height));
+    }
+}
+
+// JNI callback for SENSOR_INFO_ACTIVE_ARRAY_SIZE
+extern "C" JNIEXPORT void JNICALL
+Java_com_epicgames_ue4_Camera2Helper_onActiveArraySizeAvailable(JNIEnv* env, jclass clazz,
+    jint width, jint height)
+{
+    UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2 active array size: %dx%d"), width, height);
+    if (GEngine)
+    {
+        GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Silver,
+            FString::Printf(TEXT("Active Array: %dx%d"), width, height));
     }
 }
 
@@ -301,8 +371,8 @@ bool USimpleCamera2Test::StartCameraPreview()
     UE_LOG(LogSimpleCamera2, Warning, TEXT("=== CHECKING CAMERA TEXTURE ==="));
     if (!CameraTexture)
     {
-        UE_LOG(LogSimpleCamera2, Warning, TEXT("Creating new camera texture 1280x720"));
-        CameraTexture = UTexture2D::CreateTransient(1280, 720, PF_B8G8R8A8);
+        UE_LOG(LogSimpleCamera2, Warning, TEXT("Creating new camera texture 1280x960"));
+        CameraTexture = UTexture2D::CreateTransient(1280, 960, PF_B8G8R8A8);
         if (CameraTexture)
         {
             UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera texture created successfully"));
@@ -310,7 +380,7 @@ bool USimpleCamera2Test::StartCameraPreview()
 
             // Initialize with dark pattern asynchronously
             const int32 InitW = 1280;
-            const int32 InitH = 720;
+            const int32 InitH = 960;
             const int32 InitSize = InitW * InitH * 4;
             uint8* InitData = new uint8[InitSize];
             FMemory::Memset(InitData, 64, InitSize); // Dark gray
@@ -570,4 +640,111 @@ TArray<float> USimpleCamera2Test::GetLensDistortion()
 FIntPoint USimpleCamera2Test::GetOriginalResolution()
 {
     return FIntPoint(GOriginalResolutionWidth, GOriginalResolutionHeight);
+}
+
+TArray<float> USimpleCamera2Test::GetLensDistortionUE()
+{
+    // Always return 8 coefficients in the order: [K1,K2,P1,P2,K3,K4,K5,K6]
+    TArray<float> Mapped;
+    Mapped.SetNumZeroed(8);
+
+    // Nothing recorded
+    if (GLensDistortionLength <= 0 || GLensDistortionCoeffs.Num() <= 0)
+    {
+        return Mapped;
+    }
+
+    const int32 N = GLensDistortionLength;
+
+    // Case 1: Android Brown model (5 floats): [k1, k2, k3, p1, p2]
+    if (N == 5)
+    {
+        const float k1 = GLensDistortionCoeffs[0];
+        const float k2 = GLensDistortionCoeffs[1];
+        const float k3 = GLensDistortionCoeffs[2];
+        const float p1 = GLensDistortionCoeffs[3];
+        const float p2 = GLensDistortionCoeffs[4];
+
+        Mapped[0] = k1; // K1
+        Mapped[1] = k2; // K2
+        Mapped[2] = p1; // P1
+        Mapped[3] = p2; // P2
+        Mapped[4] = k3; // K3
+        // K4..K6 left at 0
+        return Mapped;
+    }
+
+    // Case 2: Radial-only model (>=6 floats): [k1,k2,k3,k4,k5,k6,...]
+    if (N >= 6)
+    {
+        Mapped[0] = GLensDistortionCoeffs[0]; // K1
+        Mapped[1] = GLensDistortionCoeffs[1]; // K2
+        // P1,P2 = 0
+        Mapped[4] = GLensDistortionCoeffs[2]; // K3
+        Mapped[5] = GLensDistortionCoeffs[3]; // K4
+        Mapped[6] = GLensDistortionCoeffs[4]; // K5
+        Mapped[7] = GLensDistortionCoeffs[5]; // K6
+        return Mapped;
+    }
+
+    // Fallback: copy what we can for first two as K1,K2
+    Mapped[0] = GLensDistortionCoeffs[0];
+    if (N > 1) { Mapped[1] = GLensDistortionCoeffs[1]; }
+    return Mapped;
+}
+
+FString USimpleCamera2Test::GetCameraCharacteristicsJson()
+{
+    return GCameraCharacteristicsJson;
+}
+
+void USimpleCamera2Test::RequestCameraCharacteristicsDump()
+{
+#if PLATFORM_ANDROID
+    JNIEnv* Env = FAndroidApplication::GetJavaEnv();
+    if (!Env)
+    {
+        UE_LOG(LogSimpleCamera2, Error, TEXT("JNI env not available for characteristics dump request"));
+        return;
+    }
+
+    if (!Camera2HelperInstance)
+    {
+        UE_LOG(LogSimpleCamera2, Error, TEXT("Camera2HelperInstance is null; start camera first"));
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("Start camera before dumping characteristics"));
+        }
+        return;
+    }
+
+    jclass HelperClass = Env->GetObjectClass(Camera2HelperInstance);
+    if (!HelperClass)
+    {
+        UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get Camera2Helper class for dump call"));
+        return;
+    }
+
+    jmethodID DumpMethod = Env->GetMethodID(HelperClass, "dumpCameraCharacteristics", "()V");
+    if (!DumpMethod)
+    {
+        UE_LOG(LogSimpleCamera2, Error, TEXT("dumpCameraCharacteristics() not found on Camera2Helper"));
+        return;
+    }
+
+    Env->CallVoidMethod(Camera2HelperInstance, DumpMethod);
+
+    if (Env->ExceptionCheck())
+    {
+        UE_LOG(LogSimpleCamera2, Error, TEXT("JNI exception during dumpCameraCharacteristics"));
+        Env->ExceptionDescribe();
+        Env->ExceptionClear();
+    }
+    else
+    {
+        UE_LOG(LogSimpleCamera2, Warning, TEXT("Requested CameraCharacteristics JSON dump from Java"));
+    }
+#else
+    UE_LOG(LogSimpleCamera2, Warning, TEXT("Characteristics dump only available on Android"));
+#endif
 }

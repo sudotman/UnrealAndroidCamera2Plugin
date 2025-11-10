@@ -56,4 +56,17 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "Camera2|Intrinsics")
     static FIntPoint GetOriginalResolution();
+
+    // Mapped coefficients for typical UE usage: [K1,K2,P1,P2,K3,K4,K5,K6]
+    UFUNCTION(BlueprintPure, Category = "Camera2|Lens Distortion")
+    static TArray<float> GetLensDistortionUE();
+    
+    // Camera characteristics full dump (JSON)
+    UFUNCTION(BlueprintPure, Category = "Camera2|Characteristics")
+    static FString GetCameraCharacteristicsJson();
+
+    // Request Java side to (re)dump current camera characteristics
+    UFUNCTION(BlueprintCallable, Category = "Camera2|Characteristics")
+    static void RequestCameraCharacteristicsDump();
+    
 };
