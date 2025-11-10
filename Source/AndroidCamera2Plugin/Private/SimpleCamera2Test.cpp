@@ -42,9 +42,134 @@ static int32 GOriginalResolutionHeight = 0;
 
 // JSON dump of full CameraCharacteristics
 static FString GCameraCharacteristicsJson;
+static FString GCameraCharacteristicsJsonPath;
 
 #if PLATFORM_ANDROID
 static jobject Camera2HelperInstance = nullptr;
+
+static bool EnsureCamera2HelperInstance(JNIEnv* Env)
+{
+	if (!Env)
+	{
+		return false;
+	}
+
+	if (Camera2HelperInstance)
+	{
+		return true;
+	}
+
+	jobject Activity = FAndroidApplication::GetGameActivityThis();
+	if (!Activity)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("Game Activity is null; cannot acquire Camera2Helper instance"));
+		return false;
+	}
+
+	jclass ActivityClass = Env->GetObjectClass(Activity);
+	if (!ActivityClass)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get Activity class while acquiring Camera2Helper"));
+		return false;
+	}
+
+	jmethodID GetClassLoaderMethod = Env->GetMethodID(ActivityClass, "getClassLoader", "()Ljava/lang/ClassLoader;");
+	if (!GetClassLoaderMethod)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("getClassLoader not found on Activity"));
+		Env->DeleteLocalRef(ActivityClass);
+		return false;
+	}
+
+	jobject ClassLoader = Env->CallObjectMethod(Activity, GetClassLoaderMethod);
+	if (Env->ExceptionCheck())
+	{
+		Env->ExceptionDescribe();
+		Env->ExceptionClear();
+		Env->DeleteLocalRef(ActivityClass);
+		return false;
+	}
+
+	jclass ClassLoaderClass = Env->GetObjectClass(ClassLoader);
+	jmethodID LoadClassMethod = nullptr;
+	if (ClassLoaderClass)
+	{
+		LoadClassMethod = Env->GetMethodID(ClassLoaderClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+	}
+
+	if (!LoadClassMethod)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get loadClass method while acquiring Camera2Helper"));
+		if (ClassLoaderClass) { Env->DeleteLocalRef(ClassLoaderClass); }
+		Env->DeleteLocalRef(ClassLoader);
+		Env->DeleteLocalRef(ActivityClass);
+		return false;
+	}
+
+	jstring ClassName = Env->NewStringUTF("com.epicgames.ue4.Camera2Helper");
+	jclass Camera2Class = (jclass)Env->CallObjectMethod(ClassLoader, LoadClassMethod, ClassName);
+	Env->DeleteLocalRef(ClassName);
+
+	if (Env->ExceptionCheck())
+	{
+		Env->ExceptionDescribe();
+		Env->ExceptionClear();
+		if (Camera2Class) { Env->DeleteLocalRef(Camera2Class); }
+		if (ClassLoaderClass) { Env->DeleteLocalRef(ClassLoaderClass); }
+		Env->DeleteLocalRef(ClassLoader);
+		Env->DeleteLocalRef(ActivityClass);
+		return false;
+	}
+
+	if (!Camera2Class)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("Camera2Helper class not found while acquiring instance"));
+		if (ClassLoaderClass) { Env->DeleteLocalRef(ClassLoaderClass); }
+		Env->DeleteLocalRef(ClassLoader);
+		Env->DeleteLocalRef(ActivityClass);
+		return false;
+	}
+
+	jmethodID GetInstanceMethod = Env->GetStaticMethodID(Camera2Class, "getInstance", "(Landroid/content/Context;)Lcom/epicgames/ue4/Camera2Helper;");
+	if (!GetInstanceMethod)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("getInstance method not found on Camera2Helper"));
+		Env->DeleteLocalRef(Camera2Class);
+		if (ClassLoaderClass) { Env->DeleteLocalRef(ClassLoaderClass); }
+		Env->DeleteLocalRef(ClassLoader);
+		Env->DeleteLocalRef(ActivityClass);
+		return false;
+	}
+
+	jobject LocalCamera = Env->CallStaticObjectMethod(Camera2Class, GetInstanceMethod, Activity);
+	bool bSuccess = false;
+	if (Env->ExceptionCheck())
+	{
+		Env->ExceptionDescribe();
+		Env->ExceptionClear();
+	}
+	else if (LocalCamera)
+	{
+		Camera2HelperInstance = Env->NewGlobalRef(LocalCamera);
+		Env->DeleteLocalRef(LocalCamera);
+		bSuccess = (Camera2HelperInstance != nullptr);
+		if (!bSuccess)
+		{
+			UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to create global ref for Camera2Helper"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("getInstance returned null for Camera2Helper"));
+	}
+
+	Env->DeleteLocalRef(Camera2Class);
+	if (ClassLoaderClass) { Env->DeleteLocalRef(ClassLoaderClass); }
+	Env->DeleteLocalRef(ClassLoader);
+	Env->DeleteLocalRef(ActivityClass);
+
+	return bSuccess;
+}
 #endif
 
 
@@ -159,6 +284,62 @@ Java_com_epicgames_ue4_Camera2Helper_onCharacteristicsDumpAvailable(JNIEnv* env,
     {
         UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to receive CameraCharacteristics JSON dump"));
     }
+
+	if (Camera2HelperInstance)
+	{
+		jclass HelperClass = env->GetObjectClass(Camera2HelperInstance);
+		if (HelperClass)
+		{
+			jmethodID GetPathMethod = env->GetMethodID(HelperClass, "getLastCharacteristicsDumpPath", "()Ljava/lang/String;");
+			jmethodID GetJsonMethod = env->GetMethodID(HelperClass, "getLastCharacteristicsDumpJson", "()Ljava/lang/String;");
+
+			auto UpdateFromString = [&env](jstring StringObj, FString& OutValue)
+			{
+				if (!StringObj)
+				{
+					OutValue.Reset();
+					return;
+				}
+				const char* Chars = env->GetStringUTFChars(StringObj, nullptr);
+				if (Chars)
+				{
+					OutValue = UTF8_TO_TCHAR(Chars);
+					env->ReleaseStringUTFChars(StringObj, Chars);
+				}
+				env->DeleteLocalRef(StringObj);
+			};
+
+			if (GetPathMethod)
+			{
+				jstring PathString = (jstring)env->CallObjectMethod(Camera2HelperInstance, GetPathMethod);
+				if (env->ExceptionCheck())
+				{
+					env->ExceptionDescribe();
+					env->ExceptionClear();
+				}
+				else
+				{
+					UpdateFromString(PathString, GCameraCharacteristicsJsonPath);
+				}
+			}
+
+			if (GetJsonMethod)
+			{
+				jstring JsonString = (jstring)env->CallObjectMethod(Camera2HelperInstance, GetJsonMethod);
+				if (env->ExceptionCheck())
+				{
+					env->ExceptionDescribe();
+					env->ExceptionClear();
+				}
+				else
+				{
+					UpdateFromString(JsonString, GCameraCharacteristicsJson);
+				}
+			}
+
+			env->DeleteLocalRef(HelperClass);
+		}
+	}
 }
 
 // JNI callback for intrinsics
@@ -657,22 +838,19 @@ TArray<float> USimpleCamera2Test::GetLensDistortionUE()
     const int32 N = GLensDistortionLength;
 
     // Case 1: Android Brown model (5 floats): [k1, k2, k3, p1, p2]
-    if (N == 5)
-    {
-        const float k1 = GLensDistortionCoeffs[0];
-        const float k2 = GLensDistortionCoeffs[1];
-        const float k3 = GLensDistortionCoeffs[2];
-        const float p1 = GLensDistortionCoeffs[3];
-        const float p2 = GLensDistortionCoeffs[4];
-
-        Mapped[0] = k1; // K1
-        Mapped[1] = k2; // K2
-        Mapped[2] = p1; // P1
-        Mapped[3] = p2; // P2
-        Mapped[4] = k3; // K3
-        // K4..K6 left at 0
-        return Mapped;
-    }
+	if (N == 5)
+	{
+		// Most devices provide 5 radial coefficients via LENS_DISTORTION (no tangential).
+		// Map them as K1..K5, leaving P1/P2 at zero.
+		Mapped[0] = GLensDistortionCoeffs[0]; // K1
+		Mapped[1] = GLensDistortionCoeffs[1]; // K2
+		// P1,P2 remain 0
+		Mapped[4] = GLensDistortionCoeffs[2]; // K3
+		Mapped[5] = GLensDistortionCoeffs[3]; // K4
+		Mapped[6] = GLensDistortionCoeffs[4]; // K5
+		// K6 remains 0
+		return Mapped;
+	}
 
     // Case 2: Radial-only model (>=6 floats): [k1,k2,k3,k4,k5,k6,...]
     if (N >= 6)
@@ -693,58 +871,127 @@ TArray<float> USimpleCamera2Test::GetLensDistortionUE()
     return Mapped;
 }
 
-FString USimpleCamera2Test::GetCameraCharacteristicsJson()
+void USimpleCamera2Test::GetCameraCharacteristics(bool bRedump, FString& OutJson, FString& OutFilePath)
 {
-    return GCameraCharacteristicsJson;
-}
+	OutJson = GCameraCharacteristicsJson;
+	OutFilePath = GCameraCharacteristicsJsonPath;
 
-void USimpleCamera2Test::RequestCameraCharacteristicsDump()
-{
 #if PLATFORM_ANDROID
-    JNIEnv* Env = FAndroidApplication::GetJavaEnv();
-    if (!Env)
-    {
-        UE_LOG(LogSimpleCamera2, Error, TEXT("JNI env not available for characteristics dump request"));
-        return;
-    }
+	JNIEnv* Env = FAndroidApplication::GetJavaEnv();
+	if (!Env)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("JNI env not available for GetCameraCharacteristics"));
+		return;
+	}
 
-    if (!Camera2HelperInstance)
-    {
-        UE_LOG(LogSimpleCamera2, Error, TEXT("Camera2HelperInstance is null; start camera first"));
-        if (GEngine)
-        {
-            GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Red, TEXT("Start camera before dumping characteristics"));
-        }
-        return;
-    }
+	if (!EnsureCamera2HelperInstance(Env))
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("Unable to access Camera2Helper instance for GetCameraCharacteristics"));
+		return;
+	}
 
-    jclass HelperClass = Env->GetObjectClass(Camera2HelperInstance);
-    if (!HelperClass)
-    {
-        UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get Camera2Helper class for dump call"));
-        return;
-    }
+	jclass HelperClass = Env->GetObjectClass(Camera2HelperInstance);
+	if (!HelperClass)
+	{
+		UE_LOG(LogSimpleCamera2, Error, TEXT("Failed to get Camera2Helper class for GetCameraCharacteristics"));
+		return;
+	}
 
-    jmethodID DumpMethod = Env->GetMethodID(HelperClass, "dumpCameraCharacteristics", "()V");
-    if (!DumpMethod)
-    {
-        UE_LOG(LogSimpleCamera2, Error, TEXT("dumpCameraCharacteristics() not found on Camera2Helper"));
-        return;
-    }
+	auto UpdateFromJString = [Env](jstring InString, FString& Target)
+	{
+		if (!InString)
+		{
+			Target.Reset();
+			return;
+		}
+		const char* Chars = Env->GetStringUTFChars(InString, nullptr);
+		if (Chars)
+		{
+			Target = UTF8_TO_TCHAR(Chars);
+			Env->ReleaseStringUTFChars(InString, Chars);
+		}
+		Env->DeleteLocalRef(InString);
+	};
 
-    Env->CallVoidMethod(Camera2HelperInstance, DumpMethod);
+	if (bRedump)
+	{
+		jmethodID DumpMethod = Env->GetMethodID(HelperClass, "dumpCameraCharacteristicsAndReturnJsonAndPath", "()[Ljava/lang/String;");
+		if (!DumpMethod)
+		{
+			UE_LOG(LogSimpleCamera2, Error, TEXT("dumpCameraCharacteristicsAndReturnJsonAndPath() not found on Camera2Helper"));
+			Env->DeleteLocalRef(HelperClass);
+			return;
+		}
 
-    if (Env->ExceptionCheck())
-    {
-        UE_LOG(LogSimpleCamera2, Error, TEXT("JNI exception during dumpCameraCharacteristics"));
-        Env->ExceptionDescribe();
-        Env->ExceptionClear();
-    }
-    else
-    {
-        UE_LOG(LogSimpleCamera2, Warning, TEXT("Requested CameraCharacteristics JSON dump from Java"));
-    }
+		jobjectArray ResultArray = (jobjectArray)Env->CallObjectMethod(Camera2HelperInstance, DumpMethod);
+		if (Env->ExceptionCheck())
+		{
+			UE_LOG(LogSimpleCamera2, Error, TEXT("JNI exception while dumping camera characteristics"));
+			Env->ExceptionDescribe();
+			Env->ExceptionClear();
+			Env->DeleteLocalRef(HelperClass);
+			return;
+		}
+
+		if (ResultArray)
+		{
+			jsize Length = Env->GetArrayLength(ResultArray);
+			if (Length >= 1)
+			{
+				jstring JsonString = (jstring)Env->GetObjectArrayElement(ResultArray, 0);
+				UpdateFromJString(JsonString, GCameraCharacteristicsJson);
+			}
+			if (Length >= 2)
+			{
+				jstring PathString = (jstring)Env->GetObjectArrayElement(ResultArray, 1);
+				UpdateFromJString(PathString, GCameraCharacteristicsJsonPath);
+			}
+			Env->DeleteLocalRef(ResultArray);
+		}
+		else
+		{
+			UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera2Helper returned null array for characteristics dump"));
+		}
+	}
+	else
+	{
+		jmethodID GetJsonMethod = Env->GetMethodID(HelperClass, "getLastCharacteristicsDumpJson", "()Ljava/lang/String;");
+		jmethodID GetPathMethod = Env->GetMethodID(HelperClass, "getLastCharacteristicsDumpPath", "()Ljava/lang/String;");
+
+		if (GetJsonMethod)
+		{
+			jstring JsonString = (jstring)Env->CallObjectMethod(Camera2HelperInstance, GetJsonMethod);
+			if (Env->ExceptionCheck())
+			{
+				Env->ExceptionDescribe();
+				Env->ExceptionClear();
+			}
+			else
+			{
+				UpdateFromJString(JsonString, GCameraCharacteristicsJson);
+			}
+		}
+
+		if (GetPathMethod)
+		{
+			jstring PathString = (jstring)Env->CallObjectMethod(Camera2HelperInstance, GetPathMethod);
+			if (Env->ExceptionCheck())
+			{
+				Env->ExceptionDescribe();
+				Env->ExceptionClear();
+			}
+			else
+			{
+				UpdateFromJString(PathString, GCameraCharacteristicsJsonPath);
+			}
+		}
+	}
+
+	Env->DeleteLocalRef(HelperClass);
+
+	OutJson = GCameraCharacteristicsJson;
+	OutFilePath = GCameraCharacteristicsJsonPath;
 #else
-    UE_LOG(LogSimpleCamera2, Warning, TEXT("Characteristics dump only available on Android"));
+	UE_LOG(LogSimpleCamera2, Warning, TEXT("Camera characteristics only available on Android"));
 #endif
 }

@@ -90,8 +90,7 @@ simple, fast camera2 access for unreal engine projects on android and meta quest
 - `USimpleCamera2Test::GetLensDistortion() -> TArray<float>`
 - `USimpleCamera2Test::GetLensDistortionUE() -> TArray<float>`
 - `USimpleCamera2Test::GetOriginalResolution() -> FIntPoint`
-- `USimpleCamera2Test::GetCameraCharacteristicsJson() -> FString`
-- `USimpleCamera2Test::RequestCameraCharacteristicsDump()` - ask java side to dump characteristics json
+- `USimpleCamera2Test::GetCameraCharacteristics(bool bRedump, FString& OutJson, FString& OutFilePath)` - fetch cached or freshly dumped JSON + save path
 
 ## permissions
 android will display a permission request dialog for camera access.  grant all camera permissions and **restart the application** to enable camera functionality.

@@ -12,6 +12,7 @@ import android.media.ImageReader;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Environment;
 import android.util.Log;
 import android.util.SizeF;
 import android.view.Surface;
@@ -23,6 +24,9 @@ import org.json.JSONObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 
 public class Camera2Helper {
     private static final String TAG = "Camera2Helper";
@@ -284,6 +288,9 @@ public class Camera2Helper {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                         // Brown model: k1, k2, p1, p2, k3 (and optionally higher order)
                         lensDist = cc.get(CameraCharacteristics.LENS_DISTORTION);
+						if (lensDist != null) {
+							Log.d(TAG, "Using CameraCharacteristics.LENS_DISTORTION, length=" + lensDist.length);
+						}
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "LENS_DISTORTION unavailable: " + e.getMessage());
@@ -292,6 +299,9 @@ public class Camera2Helper {
                 if (lensDist == null) {
                     try {
                         lensDist = cc.get(CameraCharacteristics.LENS_RADIAL_DISTORTION);
+						if (lensDist != null) {
+							Log.d(TAG, "Using CameraCharacteristics.LENS_RADIAL_DISTORTION, length=" + lensDist.length);
+						}
                     } catch (Exception e) {
                         Log.w(TAG, "LENS_RADIAL_DISTORTION unavailable: " + e.getMessage());
                     }
@@ -401,6 +411,10 @@ public class Camera2Helper {
 
     // Remember currently selected camera for dumps
     private String currentCameraId;
+	// Remember last saved dump file path
+	private String lastCharacteristicsDumpPath;
+	// Remember last JSON text
+	private String lastCharacteristicsDumpJson;
 
     // Public method to dump all CameraCharacteristics to JSON and send to native
     public void dumpCameraCharacteristics() {
@@ -467,6 +481,14 @@ public class Camera2Helper {
             root.put("values", values);
             String json = root.toString();
             Log.d(TAG, "Dumped CameraCharacteristics JSON length=" + json.length());
+			lastCharacteristicsDumpJson = json;
+			// Also persist the dump to a file accessible via adb (scoped storage safe)
+			try {
+				String fileName = "camera_characteristics_" + id + ".json";
+				saveJsonToFile(fileName, json);
+			} catch (Exception e) {
+				Log.w(TAG, "Failed to save characteristics JSON to file: " + e.getMessage());
+			}
             onCharacteristicsDumpAvailable(json);
         } catch (Exception e) {
             Log.e(TAG, "Failed to dump CameraCharacteristics: " + e.getMessage());
@@ -555,6 +577,55 @@ public class Camera2Helper {
         k.cy = (cy - crop.top) * sy;
         return k;
     }
+	
+	private void saveJsonToFile(String fileName, String jsonContent) {
+		File baseDir = null;
+		try {
+			// Prefer Documents in the app-specific external files (no WRITE permission required)
+			baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS);
+			if (baseDir == null) {
+				// Fallback to generic external files dir
+				baseDir = context.getExternalFilesDir(null);
+			}
+			if (baseDir == null) {
+				// Final fallback to internal files dir
+				baseDir = context.getFilesDir();
+			}
+			File outDir = new File(baseDir, "Camera2");
+			if (!outDir.exists()) {
+				//noinspection ResultOfMethodCallIgnored
+				outDir.mkdirs();
+			}
+			File outFile = new File(outDir, fileName);
+			try (FileOutputStream fos = new FileOutputStream(outFile, false)) {
+				byte[] bytes = jsonContent.getBytes(StandardCharsets.UTF_8);
+				fos.write(bytes);
+				fos.flush();
+			}
+			lastCharacteristicsDumpPath = outFile.getAbsolutePath();
+			Log.i(TAG, "CameraCharacteristics JSON saved: " + outFile.getAbsolutePath());
+		} catch (Throwable t) {
+			Log.w(TAG, "Error saving JSON to file in " + (baseDir != null ? baseDir.getAbsolutePath() : "<null>") + ": " + t.getMessage());
+		}
+	}
+	
+	// Exposed getters/wrappers for native side
+	public String getLastCharacteristicsDumpPath() {
+		return lastCharacteristicsDumpPath != null ? lastCharacteristicsDumpPath : "";
+	}
+	public String getLastCharacteristicsDumpJson() {
+		return lastCharacteristicsDumpJson != null ? lastCharacteristicsDumpJson : "";
+	}
+	
+	public String dumpCameraCharacteristicsAndReturnPath() {
+		dumpCameraCharacteristics();
+		return getLastCharacteristicsDumpPath();
+	}
+	
+	public String[] dumpCameraCharacteristicsAndReturnJsonAndPath() {
+		dumpCameraCharacteristics();
+		return new String[] { getLastCharacteristicsDumpJson(), getLastCharacteristicsDumpPath() };
+	}
     
     private void createCaptureSession() {
         try {

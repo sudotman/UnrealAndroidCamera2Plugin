@@ -61,12 +61,8 @@ public:
     UFUNCTION(BlueprintPure, Category = "Camera2|Lens Distortion")
     static TArray<float> GetLensDistortionUE();
     
-    // Camera characteristics full dump (JSON)
-    UFUNCTION(BlueprintPure, Category = "Camera2|Characteristics")
-    static FString GetCameraCharacteristicsJson();
-
-    // Request Java side to (re)dump current camera characteristics
+    // Unified access to camera characteristics JSON + saved file path
     UFUNCTION(BlueprintCallable, Category = "Camera2|Characteristics")
-    static void RequestCameraCharacteristicsDump();
+    static void GetCameraCharacteristics(bool bRedump, FString& OutJson, FString& OutFilePath);
     
 };
